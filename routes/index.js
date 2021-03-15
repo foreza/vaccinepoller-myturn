@@ -9,9 +9,10 @@ dotenv.config();  // Get config values for twilio usage
 const axios = require('axios')
 const targetURI = 'https://api.myturn.ca.gov/public/locations/search';
 const requestPayload = {
-  "location": { "lat": 34.0631451, "lng": -118.4367551 },
-  "fromDate": "2021-03-14",
-  "vaccineData": "WyJhM3F0MDAwMDAwMDFBZ1ZBQVUiLCJhM3F0MDAwMDAwMDFBZExBQVUiLCJhM3F0MDAwMDAwMDFBZE1BQVUiLCJhM3F0MDAwMDAwMDFBZ1VBQVUiLCJhM3F0MDAwMDAwMDFBc2FBQUUiXQ==",
+  "location": { 
+    "lat": Number.parseFloat(process.env.CURR_LAT), "lng": Number.parseFloat(process.env.CURR_LONG)},
+  "fromDate": util_makeTodayDate(),
+  "vaccineData": process.env.VACCINE_DATA,
   "locationQuery": { "includePools": ["default"] },
   "doseNumber": 1,
   "url": "https://myturn.ca.gov/location-select"
@@ -19,10 +20,14 @@ const requestPayload = {
 
 // CRON
 var cron = require('node-cron');
+var pollInterval = process.env.CRON_POLL_INTERVAL;
 
 // TODO: these should be retrieved from some DB
+// Is this state management?? Answer: NO.
+// WHY? Because I need to automate this quickly. Sorry, guys.
 var pollTask = null;
 var numOfPollsDone = 0;
+var latestData = "";
 
 // Twilio SETUP (TEMPORARY)
 var twilio = require('twilio');
@@ -40,9 +45,14 @@ var phoneNumArr = process.env.MYPHONENUMARR.split(',');
 var storedHash = "";
 
 
-router.get('/startPoll', () => {
+router.get('/startPoll', (req, res, next) => {
+  
+  // Call this immediately.
+  axiosPostForMyTurn(targetURI, requestPayload);
+
+  // Schedule the pollTask to continue calling every .. minute
   if (!pollTask) {
-    pollTask = cron.schedule('*/10 * * * *', () => {
+    pollTask = cron.schedule(pollInterval, () => {
       numOfPollsDone++;
       axiosPostForMyTurn(targetURI, requestPayload);
     });
@@ -50,16 +60,19 @@ router.get('/startPoll', () => {
     pollTask.start();
   }
 
+  res.render('index', { title: `Polling started at ${new Date()}` });
+
 });
 
 
 // Stop the cron task.
-router.get('/stopPoll', () => {
+router.get('/stopPoll', (req, res, next) => {
   if (pollTask) {
     console.log('Stopping poll');
     pollTask.stop();
   }
 
+  res.render('index', { title: `Polling stopped at ${new Date()}` });
 });
 
 // Helper to verify Twilio functionality
@@ -90,23 +103,31 @@ function axiosPostForMyTurn(uri, payload) {
     .then(res => {
 
       var data = res.data;
-      console.log(`total locations available: ${data.locations.length}`)
 
       // Filter out all 3rd party booking
       var non3rdParty = data.locations.filter(function (location) {
         return location.type != "ThirdPartyBooking"
       });
 
-      console.log(`3rd party locations available: ${non3rdParty.length}`)
-
-      // Feed this to our hash function
+      // Feed this to our "hash function"
       var currHash = util_calculateHashForDifference(data.locations.length, non3rdParty.length);
       if (currHash != storedHash) {
-        sendTextForPhoneNumbersWithMessage(phoneNumArr, `There was a major change in covid19 vaccine availability. Total Openings: ${data.locations.length} Number of 3rd Party: ${non3rdParty.length} \n Check myturn. \n #${numOfPollsDone}`);
-        // update the hash after sending
+
+        var dataList = "";
+
+        for (var i = 0; i < data.locations.length; ++i) {
+          var dataEntry = "";
+          dataEntry = `\nName: ${data.locations[i].name}\nType: ${data.locations[i].type == "ThirdPartyBooking" ? "3rdParty" : "Legit"}\n`;
+            dataList += dataEntry;
+        }
+
+        console.log("List of data:" , dataList);
+
+        sendTextForPhoneNumbersWithMessage(phoneNumArr, 
+          `${util_makeTodayDate()} - Change in vaccine availability.\nListings:${data.locations.length}\n3rdPtyList:${non3rdParty.length}\nCheck https://myturn.ca.gov/location-select. 
+          #${numOfPollsDone}${dataList}`);
         storedHash = currHash;
       }
-
     })
     .catch(error => {
       console.error(error)
@@ -123,6 +144,18 @@ function util_calculateHashForDifference(totalBooking, num3rdPartyBooking) {
   // We'll do a simple string concat for now since we don't have anything to hide
   console.log(` Hash: {b64String} at ${new Date()};`);
   return string1 + string2;
+}
+
+
+// TODO: Because writing your own utility function instead of using moment.js (bless her soul) is cooler. Yeah, tell me how bad this is
+function util_makeTodayDate(){
+  var date = new Date();
+  var year_part = date.getFullYear().toString();
+  var month_part = date.getMonth()+1;
+  month_part = month_part < 10 ? "0" + month_part : month_part.toString(); 
+  var day_part = date.getDate().toString();
+  var dateString = `${year_part}-${month_part}-${day_part}`;
+  return dateString;
 }
 
 
